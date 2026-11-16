@@ -7,6 +7,7 @@ const rateLimit = require("express-rate-limit");
 const { createClient } = require("@supabase/supabase-js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const app = express();
 
@@ -20,7 +21,12 @@ app.use(cors({
     ? true
     : allowedOrigins.split(",").map(s => s.trim()),
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "apikey"]
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "apikey",
+    "x-admin-key"
+  ]
 }));
 
 app.use(express.json({ limit: "20kb" }));
@@ -43,7 +49,6 @@ if (process.env.JWT_SECRET.length < 32) {
   throw new Error("JWT_SECRET must be at least 32 characters.");
 }
 
-// Supabase connection
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SECRET_KEY,
@@ -101,7 +106,6 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // Find user
     const { data: user, error: userError } = await supabase
       .from("users")
       .select("id, username, password_hash, is_active")
@@ -129,7 +133,6 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // Validate license
     const { data: license, error: licenseError } = await supabase
       .from("license_keys")
       .select("id, key, user_id, is_active, expires_at")
@@ -158,7 +161,6 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // Generate JWT
     const token = jwt.sign(
       {
         sub: String(user.id),
@@ -195,6 +197,93 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
       success: false,
       code: "SERVER_ERROR",
       message: "Terjadi kesalahan server."
+    });
+  }
+});
+
+// ADMIN: Create user and license
+app.post("/admin/users", async (req, res) => {
+  try {
+    const adminKey = req.headers["x-admin-key"] || "";
+    const expectedKey = process.env.ADMIN_API_KEY || "";
+
+    if (!expectedKey || adminKey !== expectedKey) {
+      return res.status(401).json({
+        success: false,
+        message: "Akses Admin ditolak."
+      });
+    }
+
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+    const days = req.body?.expiresInDays;
+
+    if (!username || password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Username wajib diisi dan password minimal 8 karakter."
+      });
+    }
+
+    if (
+      days !== undefined &&
+      (!Number.isInteger(days) || days < 1)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Masa aktif harus berupa jumlah hari minimal 1."
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .insert({
+        username,
+        password_hash: passwordHash,
+        is_active: true
+      })
+      .select("id, username")
+      .single();
+
+    if (userError) throw userError;
+
+    const licenseKey =
+      "RX-" + crypto.randomBytes(12).toString("hex").toUpperCase();
+
+    const expiresAt = days
+      ? new Date(Date.now() + days * 86400000).toISOString()
+      : null;
+
+    const { error: licenseError } = await supabase
+      .from("license_keys")
+      .insert({
+        key: licenseKey,
+        user_id: user.id,
+        is_active: true,
+        expires_at: expiresAt
+      });
+
+    if (licenseError) {
+      await supabase.from("users").delete().eq("id", user.id);
+      throw licenseError;
+    }
+
+    return res.json({
+      success: true,
+      message: "Akun PREMIUM berhasil dibuat.",
+      user,
+      licenseKey,
+      expiresAt
+    });
+
+  } catch (error) {
+    console.error("Admin create user error:", error.message || error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Gagal membuat akun."
     });
   }
 });
@@ -251,4 +340,6 @@ const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`RayyannX GGMP API listening on port ${PORT}`);
 });
+    
       
+
